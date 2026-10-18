@@ -11,7 +11,7 @@ repo = File.expand_path("..", __dir__)
 workspace = File.dirname(repo)
 work = File.join(repo, "tmp/bench")
 options = { apps: "rails,django,laravel,express,elixir,go,rust,c", rounds: 3, duration: 8, concurrencies: "16", port: 25130,
-  workspace: workspace, seed: File.join(repo, "fixtures/default"), preflight: false, keep_runtime: false, mixed_write_rate: 0,
+  workspace: workspace, seed: File.join(repo, "fixtures/default"), preflight: false, keep_runtime: false, mixed_write_rate: 0, round: 0,
   loadgen: ENV.fetch("LOADGEN", File.join(repo, "loadgen/target/release/loadgen")),
   env_file: ENV.fetch("BENCH_ENV_FILE", File.join(repo, "fixtures/default/reference.env")),
   output: File.join(work, "results", "#{Time.now.utc.strftime('%Y%m%d-%H%M%S')}-#{Process.pid}"), cpus: "8-11", client_cpus: "12-15",
@@ -27,7 +27,11 @@ OptionParser.new do |parser|
   end
   parser.on("--help") { puts parser; exit }
 end.parse!
-raise "use at least two rounds" unless options[:rounds] >= 2
+# `--round N` runs only round N of the sequence `--rounds` would run (its app order, its file names),
+# so profiles can be interleaved round by round and a summary taken across the invocations.
+raise "use at least two rounds" unless options[:rounds] >= 2 || options[:round].positive?
+raise "round must be positive" if options[:round].negative?
+iterations = options[:round].positive? ? [options[:round] - 1] : (0...options[:rounds]).to_a
 apps = options[:apps].split(",")
 implementations = implementations(apps, ENV, options[:workspace]).to_h { |implementation| [implementation.app, implementation] }
 selected_routes = options[:routes].split(",")
@@ -72,7 +76,7 @@ container = "cf-native-bench-#{Process.pid}"
 results = []
 metadata = { verification_revision: run("git", "-C", repo, "rev-parse", "HEAD").strip, response_validation: "route-contract-v1", started_at: Time.now.utc.iso8601, seed_sha256: original_seed_sha, server_cpus: options[:cpus],
   client_cpus: options[:client_cpus], network: "host", gzip: true, duration: options[:duration],
-  concurrencies: options[:concurrencies], rounds: options[:rounds], loadgen_sha256: Digest::SHA256.file(options[:loadgen]).hexdigest,
+  concurrencies: options[:concurrencies], rounds: options[:rounds], round: (options[:round] if options[:round].positive?), loadgen_sha256: Digest::SHA256.file(options[:loadgen]).hexdigest,
   routes: selected_routes.join(","), profile: mixed ? "mixed-read-write-v1" : "read-and-post-v1",
   mixed_writer: mixed ? {clients: 1, maximum_writes_per_second: options[:mixed_write_rate], room: write_room, catch_up: false} : nil, images: {}, image_labels: {}, source_revisions: {}, preflight_only: options[:preflight] }
 sql = ->(db, query) do
@@ -84,7 +88,7 @@ check_sample = ->(name, value) do
   raise "#{name}: unsuccessful requests #{value}" unless value.fetch("errors").zero? && value.fetch("invalid_responses").zero? && value.fetch("validation") == "route-contract-v1" && value.fetch("ok") > 0 && value.fetch("statuses") == { "200" => value.fetch("ok") }
 end
 begin
-  options[:rounds].times do |iteration|
+  iterations.each do |iteration|
     order = iteration.even? ? apps : apps.reverse
     order.each do |app|
       kind = runtimes.fetch(app)
