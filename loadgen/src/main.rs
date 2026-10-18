@@ -121,11 +121,9 @@ async fn send(
     // A request that takes longer than this counts as an error (and drops the connection).
     tokio::time::timeout(Duration::from_secs(30), async {
         sender.ready().await?;
-        let resp = sender.send_request(req).await?;
-        let status = resp.status().as_u16();
-        let headers = resp.headers().clone();
-        let body = resp.into_body().collect().await?.to_bytes();
-        Ok(Resp { status, headers, body })
+        let (parts, body) = sender.send_request(req).await?.into_parts();
+        let body = body.collect().await?.to_bytes();
+        Ok(Resp { status: parts.status.as_u16(), headers: parts.headers, body })
     })
     .await
     .map_err(|_| "request timed out after 30s")?
@@ -303,6 +301,36 @@ async fn http_load(a: &Args) -> Res<Value> {
     Ok(reads)
 }
 
+// Runs the clients on one single-threaded runtime per CPU this process may use, spread evenly: a
+// client's connection (hyper's connection task) and its requests then share a thread, so a
+// response wakes no other thread. On the default multi-thread runtime they could sit on two, and
+// the generator spent most of its CPU in the kernel handing wake-ups between threads.
+async fn run_on_cpu_threads(clients: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>) -> Res<()> {
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, clients.len().max(1));
+    let mut groups: Vec<Vec<_>> = (0..threads).map(|_| Vec::new()).collect();
+    for (i, client) in clients.into_iter().enumerate() {
+        groups[i % threads].push(client);
+    }
+    let handles: Vec<_> = groups
+        .into_iter()
+        .map(|group| {
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("client runtime");
+                runtime.block_on(async move {
+                    let tasks: Vec<_> = group.into_iter().map(tokio::spawn).collect();
+                    for task in tasks {
+                        task.await.expect("client task");
+                    }
+                });
+            })
+        })
+        .collect();
+    tokio::task::spawn_blocking(move || handles.into_iter().try_for_each(|h| h.join().map(|_| ())))
+        .await?
+        .map_err(|_| "a client thread panicked")?;
+    Ok(())
+}
+
 async fn http_window(a: &Args, start: Instant) -> Res<Value> {
     let addr = host_port(&a.get("base"));
     let cookie = a.opt("cookie").unwrap_or_default();
@@ -336,7 +364,7 @@ async fn http_window(a: &Args, start: Instant) -> Res<Value> {
     let invalid_reasons = Arc::new(Mutex::new(HashMap::<String, u64>::new()));
     let bytes_total = Arc::new(AtomicU64::new(0));
     let deadline = start + duration;
-    let mut tasks = Vec::new();
+    let mut clients: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> = Vec::new();
     for _ in 0..conc {
         let (addr, cookie, path, post_room, csrf) = (addr.clone(), cookie.clone(), path.clone(), post_room.clone(), csrf.clone());
         let invalid_responses = invalid_responses.clone();
@@ -349,7 +377,7 @@ async fn http_window(a: &Args, start: Instant) -> Res<Value> {
         let audit = audit.clone();
         let auditing = audit_path.is_some();
         let tracing = trace_path.is_some();
-        tasks.push(tokio::spawn(async move {
+        clients.push(Box::pin(async move {
             let mut h = hist();
             let mut local = HashMap::<u16, u64>::new();
             let mut conn: Option<SendRequest<Full<Bytes>>> = None;
@@ -358,6 +386,7 @@ async fn http_window(a: &Args, start: Instant) -> Res<Value> {
             let mut local_trace = Vec::new();
             let mut local_audit = Vec::new();
             let mut next_issue = start;
+            let get_headers = vec![("cookie", cookie.clone()), ("accept-encoding", accept_encoding.to_string())];
             while Instant::now() < deadline && issued.fetch_add(1, Ordering::Relaxed) < limit {
                 if interval > 0 {
                     tokio::time::sleep_until(next_issue.into()).await;
@@ -384,11 +413,7 @@ async fn http_window(a: &Args, start: Instant) -> Res<Value> {
                         h.push(("accept-encoding", accept_encoding.into()));
                         ("POST", format!("/rooms/{room}/messages"), h, b)
                     }
-                    None => {
-                        let mut h = vec![("cookie", cookie.clone())];
-                        h.push(("accept-encoding", accept_encoding.into()));
-                        ("GET", path.clone(), h, Bytes::new())
-                    }
+                    None => ("GET", path.clone(), get_headers.clone(), Bytes::new()),
                 };
                 let t0 = Instant::now();
                 let wall0 =
@@ -445,9 +470,7 @@ async fn http_window(a: &Args, start: Instant) -> Res<Value> {
             }
         }));
     }
-    for t in tasks {
-        t.await?;
-    }
+    run_on_cpu_threads(clients).await?;
     let elapsed = start.elapsed().as_secs_f64();
     if let Some(path) = &trace_path {
         // One line per request: start (unix µs), latency (µs), status.
