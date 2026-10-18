@@ -29,8 +29,7 @@ OptionParser.new do |parser|
 end.parse!
 raise "use at least two rounds" unless options[:rounds] >= 2
 apps = options[:apps].split(",")
-allowed = %w[rails django laravel express express-bun elixir go rust c cpp]
-raise "apps must be nonempty, unique and supported" unless !apps.empty? && apps.uniq == apps && apps.all? { |app| allowed.include?(app) }
+implementations = implementations(apps, ENV, options[:workspace]).to_h { |implementation| [implementation.app, implementation] }
 selected_routes = options[:routes].split(",")
 raise "unknown or empty route selection" unless !selected_routes.empty? && (selected_routes - %w[room_show messages_page sidebar search avatar static_css up post_message]).empty?
 raise "duration and concurrencies must be positive" unless options[:duration].positive? && !options[:concurrencies].split(",").empty? && options[:concurrencies].split(",").all? { |value| Integer(value).positive? }
@@ -40,7 +39,7 @@ if mixed
   selected_routes &= %w[room_show messages_page sidebar search]
   raise "mixed profile requires a read route" if selected_routes.empty?
 end
-runtimes = apps.to_h { |app| [app, app == "express-bun" ? "express" : app] }
+runtimes = implementations.transform_values(&:kind)
 env_name = ->(app) { app.upcase.tr("-", "_") }
 labels = JSON.parse(File.read(File.join(options[:seed], "labels.json")))
 original_seed_sha = Digest::SHA256.file(File.join(options[:seed], "db/production.sqlite3")).hexdigest
@@ -89,9 +88,8 @@ begin
     order = iteration.even? ? apps : apps.reverse
     order.each do |app|
       kind = runtimes.fetch(app)
-      images = { "rails" => "once-campfire:app", "rust" => "campfire-rust:app", "elixir" => "campfire-elixir:app", "express-bun" => "once-campfire-express:bun" }
-      image = ENV.fetch("#{env_name.(app)}_IMAGE", images.fetch(app, "once-campfire-#{app}:app"))
-      source = File.join(options[:workspace], kind == "rails" ? "once-campfire" : "once-campfire-#{kind}")
+      image = implementations.fetch(app).image
+      source = implementations.fetch(app).source
       image_id = run("docker", "image", "inspect", "-f", "{{.Id}}", image).strip
       raise "#{app}: image changed between rounds" if metadata[:images].key?(app) && metadata[:images][app] != image_id
       metadata[:images][app] = image_id
@@ -127,8 +125,9 @@ begin
       when "c" then {processes: 1, http_loops: config.fetch("CF_LOOPS", "affinity, capped at 4"), cache_bytes: config.fetch("CF_CACHE_BYTES", "67108864"), jobs: "in-process"}
       when "cpp" then {processes: 1, page_cache_mb: config.fetch("CAMPFIRE_PAGE_CACHE_MB", "32"), cable: "native", jobs: "in-process"}
       when "django" then {http_workers: config.fetch("WEB_WORKERS", config["REDIS_URL"].to_s.empty? ? "1" : "affinity, capped at 4"), runtime: "ASGI/Uvicorn", cable: "native", jobs: "leased auxiliary SQLite"}
+      else implementations.fetch(app).topology
       end
-      unless %w[c cpp].include?(kind)
+      if KNOWN_APPS.include?(app) && !%w[c cpp].include?(kind)
         metadata[:topology][app][:response_cache_mb] = config.fetch("CAMPFIRE_RESPONSE_CACHE_MB", "64")
       end
       command = ["docker", "run", "-d", "--name", container, "--network", "host", "--cpuset-cpus", options[:cpus]]

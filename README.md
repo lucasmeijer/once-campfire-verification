@@ -21,6 +21,14 @@ bin/benchmark --apps rails,elixir,go,rust
 
 Build the implementations' production images first. Override their image names with `RAILS_IMAGE`, `DJANGO_IMAGE`, `LARAVEL_IMAGE`, `EXPRESS_IMAGE`, `ELIXIR_IMAGE`, `GO_IMAGE`, `RUST_IMAGE`, `C_IMAGE` and `CPP_IMAGE`. The C++ implementation is not in the default `--apps` list; select it with `--apps rust,cpp`. `--help` lists the benchmark options, including CPU affinity, seed path, route selection and output directory. The default is three alternating rounds with 16 concurrent clients. A process lock prevents overlapping benchmark runs. The fixture builder pins public Rails revision `90b3300` and generates real attachments and variants; it generates disposable signing, push and login credentials locally and refuses to overwrite an existing seed.
 
+An implementation the harness doesn't list runs under its own name once its image is named, so a new port can be measured before it's added here:
+
+```sh
+ZIG_IMAGE=campfire-zig:app ZIG_TOPOLOGY='{"processes":1,"jobs":"in-process"}' bin/benchmark --apps rust,zig
+```
+
+It gets no implementation-specific preparation, `ZIG_TOPOLOGY` (an optional JSON object) describes it in the results, and its source revision is read from `../once-campfire-zig`. `NAME_SOURCE` points any implementation at a checkout elsewhere.
+
 An optional cache-churn profile runs the same validated reads alongside one paced writer:
 
 ```sh
