@@ -24,8 +24,9 @@ module BenchmarkSupport
       known = KNOWN_APPS.include?(app)
       raise "#{app} isn't a known implementation; set #{name}_IMAGE to benchmark it" unless known || env["#{name}_IMAGE"]
       kind = app == "express-bun" ? "express" : app
+      # A known app's topology comes from compare.rb; an unknown one's must be an object (not null).
       topology = known ? nil : JSON.parse(env.fetch("#{name}_TOPOLOGY", "{}"))
-      raise "#{name}_TOPOLOGY must be a JSON object" unless topology.nil? || topology.is_a?(Hash)
+      raise "#{name}_TOPOLOGY must be a JSON object" unless known || topology.is_a?(Hash)
       Implementation.new(app: app, kind: kind, image: env.fetch("#{name}_IMAGE") { DEFAULT_IMAGES.fetch(app, "once-campfire-#{app}:app") },
         source: env.fetch("#{name}_SOURCE") { File.join(workspace, kind == "rails" ? "once-campfire" : "once-campfire-#{kind}") },
         topology: topology)

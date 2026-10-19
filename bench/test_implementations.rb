@@ -35,5 +35,6 @@ class ImplementationsTest < Minitest::Test
     assert_raises(RuntimeError) { implementations(%w[go go], {}, "/w") }
     assert_raises(RuntimeError) { implementations(["Bad Name"], { "BAD NAME_IMAGE" => "x" }, "/w") }
     assert_raises(RuntimeError) { implementations(%w[zig], { "ZIG_IMAGE" => "x", "ZIG_TOPOLOGY" => "[1]" }, "/w") }
+    assert_raises(RuntimeError) { implementations(%w[zig], { "ZIG_IMAGE" => "x", "ZIG_TOPOLOGY" => "null" }, "/w") }
   end
 end
