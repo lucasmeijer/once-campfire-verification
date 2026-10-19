@@ -29,6 +29,10 @@ OptionParser.new do |parser|
 end.parse!
 raise "use at least two rounds" unless options[:rounds] >= 2
 apps = options[:apps].split(",")
+# Jai's compiler is in closed beta, so its image can't be built from source here; the published build
+# and the revision it was built from are the default.
+JAI_PUBLISHED_REVISION = "e56ba63"
+JAI_PUBLISHED_IMAGE = "ghcr.io/lucasmeijer/once-campfire-jai:#{JAI_PUBLISHED_REVISION}"
 allowed = %w[rails django laravel express express-bun elixir go rust c cpp jai]
 raise "apps must be nonempty, unique and supported" unless !apps.empty? && apps.uniq == apps && apps.all? { |app| allowed.include?(app) }
 selected_routes = options[:routes].split(",")
@@ -89,8 +93,13 @@ begin
     order = iteration.even? ? apps : apps.reverse
     order.each do |app|
       kind = runtimes.fetch(app)
-      images = { "rails" => "once-campfire:app", "rust" => "campfire-rust:app", "elixir" => "campfire-elixir:app", "express-bun" => "once-campfire-express:bun" }
+      images = { "rails" => "once-campfire:app", "rust" => "campfire-rust:app", "elixir" => "campfire-elixir:app", "express-bun" => "once-campfire-express:bun",
+        "jai" => JAI_PUBLISHED_IMAGE }
       image = ENV.fetch("#{env_name.(app)}_IMAGE", images.fetch(app, "once-campfire-#{app}:app"))
+      # A registry image (Jai's published build: its compiler isn't public) is pulled on first use.
+      if image.include?("/") && !system("docker", "image", "inspect", image, out: File::NULL, err: File::NULL)
+        run("docker", "pull", "--quiet", image)
+      end
       source = File.join(options[:workspace], kind == "rails" ? "once-campfire" : "once-campfire-#{kind}")
       image_id = run("docker", "image", "inspect", "-f", "{{.Id}}", image).strip
       raise "#{app}: image changed between rounds" if metadata[:images].key?(app) && metadata[:images][app] != image_id
@@ -98,6 +107,9 @@ begin
       metadata[:image_labels][app] = JSON.parse(run("docker", "image", "inspect", "-f", "{{json .Config.Labels}}", image))
       source_identity = { head: run("git", "-C", source, "rev-parse", "HEAD").strip,
         dirty: !run("git", "-C", source, "status", "--porcelain", "--untracked-files=no").strip.empty? }
+      if image == JAI_PUBLISHED_IMAGE && !source_identity[:head].start_with?(JAI_PUBLISHED_REVISION)
+        raise "#{app}: the published image is #{JAI_PUBLISHED_REVISION}; check out #{source} at that revision"
+      end
       raise "#{app}: source changed between rounds" if metadata[:source_revisions].key?(app) && metadata[:source_revisions][app] != source_identity
       metadata[:source_revisions][app] = source_identity
       data = File.join(work, "runtime", Process.pid.to_s, "#{app}-#{iteration + 1}")
