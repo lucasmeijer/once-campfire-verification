@@ -31,7 +31,7 @@ raise "use at least two rounds" unless options[:rounds] >= 2
 apps = options[:apps].split(",")
 # Jai's compiler is in closed beta, so its image can't be built from source here; the published build
 # and the revision it was built from are the default.
-JAI_PUBLISHED_REVISION = "e56ba63"
+JAI_PUBLISHED_REVISION = "2ecd487"
 JAI_PUBLISHED_IMAGE = "ghcr.io/lucasmeijer/once-campfire-jai:#{JAI_PUBLISHED_REVISION}"
 allowed = %w[rails django laravel express express-bun elixir go rust c cpp jai]
 raise "apps must be nonempty, unique and supported" unless !apps.empty? && apps.uniq == apps && apps.all? { |app| allowed.include?(app) }
